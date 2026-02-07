@@ -16,6 +16,7 @@ const graphCtx = graphCanvas.getContext("2d");
 const centerBiasEnabledEl = document.getElementById("centerBiasEnabled");
 const centerBiasStrengthEl = document.getElementById("centerBiasStrength");
 const centerBiasValueEl = document.getElementById("centerBiasValue");
+const forceIntersectionStationsEl = document.getElementById("forceIntersectionStations");
 const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
 
@@ -117,6 +118,10 @@ function distance(ax, ay, bx, by) {
   return Math.hypot(dx, dy);
 }
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function segmentTime(length, vMax, accel, vStop) {
   const vmax = Math.max(vMax, vStop + 1e-6);
   const a = Math.max(accel, 1e-6);
@@ -131,24 +136,88 @@ function segmentTime(length, vMax, accel, vStop) {
   return 2 * (vPeak - vs) / a;
 }
 
+function normalizeStations(stations) {
+  const unique = new Set(stations.map((s) => clamp(s, 0, 1)));
+  unique.add(0);
+  unique.add(1);
+  const sorted = Array.from(unique).sort((a, b) => a - b);
+  if (sorted.length < 2) {
+    return [0, 1];
+  }
+  return sorted;
+}
+
+function lineEndpoints(line) {
+  const half = line.length * 0.5;
+  const dx = Math.cos(line.angle) * half;
+  const dy = Math.sin(line.angle) * half;
+  return {
+    x1: line.center.x - dx,
+    y1: line.center.y - dy,
+    x2: line.center.x + dx,
+    y2: line.center.y + dy,
+  };
+}
+
+function segmentIntersection(a, b, c, d) {
+  const r = { x: b.x - a.x, y: b.y - a.y };
+  const s = { x: d.x - c.x, y: d.y - c.y };
+  const denom = r.x * s.y - r.y * s.x;
+  if (Math.abs(denom) < 1e-9) {
+    return null;
+  }
+  const qp = { x: c.x - a.x, y: c.y - a.y };
+  const t = (qp.x * s.y - qp.y * s.x) / denom;
+  const u = (qp.x * r.y - qp.y * r.x) / denom;
+  if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+    return {
+      t,
+      u,
+      x: a.x + t * r.x,
+      y: a.y + t * r.y,
+    };
+  }
+  return null;
+}
+
+function buildLineStationParams(lines, config) {
+  const lists = lines.map((line) => normalizeStations([...line.stations]));
+  if (!config.ensureIntersectionStations || lines.length < 2) {
+    return lists;
+  }
+  const endpoints = lines.map((line) => lineEndpoints(line));
+  for (let i = 0; i < lines.length; i += 1) {
+    const a = endpoints[i];
+    const p1 = { x: a.x1, y: a.y1 };
+    const p2 = { x: a.x2, y: a.y2 };
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const b = endpoints[j];
+      const q1 = { x: b.x1, y: b.y1 };
+      const q2 = { x: b.x2, y: b.y2 };
+      const hit = segmentIntersection(p1, p2, q1, q2);
+      if (hit) {
+        lists[i].push(hit.t);
+        lists[j].push(hit.u);
+      }
+    }
+  }
+  return lists.map((list) => normalizeStations(list));
+}
+
 function buildStations(network, config) {
   const stations = [];
   const stationLines = [];
   const lineStations = [];
+  const lineStationParams = buildLineStationParams(network.lines, config);
 
   for (let lineIndex = 0; lineIndex < network.lines.length; lineIndex += 1) {
     const line = network.lines[lineIndex];
-    const half = line.length * 0.5;
-    const dx = Math.cos(line.angle) * half;
-    const dy = Math.sin(line.angle) * half;
-    const x1 = line.center.x - dx;
-    const y1 = line.center.y - dy;
-    const x2 = line.center.x + dx;
-    const y2 = line.center.y + dy;
+    const { x1, y1, x2, y2 } = lineEndpoints(line);
 
     const stationsOnLine = [];
-    for (let s = 0; s < line.stations.length; s += 1) {
-      const t = line.stations[s];
+    const params = lineStationParams[lineIndex];
+    for (let s = 0; s < params.length; s += 1) {
+      const t = params[s];
       const sx = x1 + (x2 - x1) * t;
       const sy = y1 + (y2 - y1) * t;
 
@@ -373,6 +442,7 @@ function readConfig() {
   const centerBiasStrength = centerBiasEnabled
     ? Math.min(1, Math.max(0, centerBiasStrengthRaw))
     : 0;
+  const ensureIntersectionStations = Boolean(forceIntersectionStationsEl?.checked);
 
   return {
     worldWidth,
@@ -394,6 +464,7 @@ function readConfig() {
     seed: Math.floor(readNumber("seed", 1234)),
     centerBiasEnabled,
     centerBiasStrength,
+    ensureIntersectionStations,
   };
 }
 
@@ -486,10 +557,11 @@ function drawTrips() {
 }
 
 function drawNetwork(network) {
-  if (!network) {
+  if (!network || !lastConfig) {
     return;
   }
   const lines = network.lines;
+  const lineStations = buildStations(network, lastConfig).lineStations;
   ctx.save();
   ctx.translate(view.offsetX, view.offsetY);
   ctx.scale(view.scale, view.scale);
@@ -510,11 +582,10 @@ function drawNetwork(network) {
     ctx.stroke();
 
     ctx.fillStyle = color;
-    line.stations.forEach((t) => {
-      const sx = x1 + (x2 - x1) * t;
-      const sy = y1 + (y2 - y1) * t;
+    const stationsOnLine = lineStations[idx] || [];
+    stationsOnLine.forEach((entry) => {
       ctx.beginPath();
-      ctx.arc(sx, sy, 4 / view.scale, 0, Math.PI * 2);
+      ctx.arc(entry.x, entry.y, 4 / view.scale, 0, Math.PI * 2);
       ctx.fill();
     });
   });
