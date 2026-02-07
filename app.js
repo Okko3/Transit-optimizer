@@ -8,6 +8,11 @@ const iterTextEl = document.getElementById("iterText");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const resampleBtn = document.getElementById("resampleBtn");
+const graphBtn = document.getElementById("graphBtn");
+const graphModal = document.getElementById("graphModal");
+const graphCloseBtn = document.getElementById("graphCloseBtn");
+const graphCanvas = document.getElementById("graphCanvas");
+const graphCtx = graphCanvas.getContext("2d");
 const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
 
@@ -19,6 +24,8 @@ let trips = [];
 let tripPaths = [];
 let runState = "Idle";
 let activeWorkers = 0;
+let graphSeries = [];
+let graphBuckets = new Map();
 let view = {
   scale: 1,
   offsetX: 0,
@@ -39,6 +46,8 @@ const palette = [
   "#cdb4db",
 ];
 const TRIP_DRAW_LIMIT = 60;
+const GRAPH_MAX_POINTS = 400;
+const GRAPH_SMOOTH_WINDOW = 7;
 
 function readNumber(id, fallback) {
   const el = document.getElementById(id);
@@ -66,6 +75,18 @@ function sampleTrips(config) {
     list.push({ ax, ay, bx, by });
   }
   return list;
+}
+
+function averageTripDistance(tripList) {
+  if (!tripList || !tripList.length) {
+    return 0;
+  }
+  let total = 0;
+  for (let i = 0; i < tripList.length; i += 1) {
+    const trip = tripList[i];
+    total += distance(trip.ax, trip.ay, trip.bx, trip.by);
+  }
+  return total / tripList.length;
 }
 
 function distance(ax, ay, bx, by) {
@@ -477,6 +498,221 @@ function draw() {
   drawNetwork(bestNetwork);
 }
 
+function addGraphSample(iter, value) {
+  const key = Math.max(0, Math.floor(iter));
+  const bucket = graphBuckets.get(key) || { sum: 0, count: 0 };
+  bucket.sum += value;
+  bucket.count += 1;
+  graphBuckets.set(key, bucket);
+  rebuildGraphSeries();
+}
+
+function rebuildGraphSeries() {
+  const entries = Array.from(graphBuckets.entries()).sort((a, b) => a[0] - b[0]);
+  graphSeries = entries.map(([iter, bucket]) => ({
+    iter,
+    value: bucket.sum / Math.max(1, bucket.count),
+  }));
+  if (graphSeries.length > GRAPH_MAX_POINTS) {
+    graphSeries = downsampleSeries(graphSeries, GRAPH_MAX_POINTS);
+  }
+}
+
+function downsampleSeries(series, maxPoints) {
+  if (series.length <= maxPoints) {
+    return series;
+  }
+  const bucketSize = series.length / maxPoints;
+  const out = [];
+  for (let i = 0; i < maxPoints; i += 1) {
+    const start = Math.floor(i * bucketSize);
+    const end = Math.min(series.length, Math.floor((i + 1) * bucketSize));
+    let sum = 0;
+    let count = 0;
+    let iterSum = 0;
+    for (let j = start; j < end; j += 1) {
+      sum += series[j].value;
+      iterSum += series[j].iter;
+      count += 1;
+    }
+    const denom = Math.max(1, count);
+    out.push({
+      iter: iterSum / denom,
+      value: sum / denom,
+    });
+  }
+  return out;
+}
+
+function smoothSeries(series, windowSize) {
+  if (series.length <= 2 || windowSize <= 1) {
+    return series;
+  }
+  const radius = Math.floor(windowSize / 2);
+  const out = [];
+  for (let i = 0; i < series.length; i += 1) {
+    let sum = 0;
+    let count = 0;
+    let iterSum = 0;
+    for (let k = -radius; k <= radius; k += 1) {
+      const idx = i + k;
+      if (idx >= 0 && idx < series.length) {
+        sum += series[idx].value;
+        iterSum += series[idx].iter;
+        count += 1;
+      }
+    }
+    out.push({
+      iter: iterSum / Math.max(1, count),
+      value: sum / Math.max(1, count),
+    });
+  }
+  return out;
+}
+
+function resizeGraphCanvas() {
+  const rect = graphCanvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  graphCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+  graphCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+  graphCtx.setTransform(1, 0, 0, 1, 0, 0);
+  graphCtx.scale(dpr, dpr);
+  drawGraph();
+}
+
+function drawGraph() {
+  const rect = graphCanvas.getBoundingClientRect();
+  const width = rect.width;
+  const height = rect.height;
+  if (!width || !height) {
+    return;
+  }
+
+  graphCtx.clearRect(0, 0, width, height);
+  graphCtx.fillStyle = "#0a0f15";
+  graphCtx.fillRect(0, 0, width, height);
+
+  if (graphSeries.length === 0) {
+    graphCtx.fillStyle = "rgba(230, 238, 247, 0.7)";
+    graphCtx.font = "13px IBM Plex Sans, Segoe UI, sans-serif";
+    graphCtx.fillText("No data yet", 18, 28);
+    return;
+  }
+
+  const maxPoints = Math.min(GRAPH_MAX_POINTS, Math.max(60, Math.floor(width)));
+  let renderSeries = graphSeries;
+  if (renderSeries.length > maxPoints) {
+    renderSeries = downsampleSeries(renderSeries, maxPoints);
+  }
+  const smoothSeriesData = smoothSeries(renderSeries, GRAPH_SMOOTH_WINDOW);
+
+  const padding = { left: 52, right: 18, top: 18, bottom: 36 };
+  const plotW = Math.max(1, width - padding.left - padding.right);
+  const plotH = Math.max(1, height - padding.top - padding.bottom);
+  const minIter = renderSeries[0].iter;
+  const maxIter = renderSeries[renderSeries.length - 1].iter;
+  let minVal = renderSeries[0].value;
+  let maxVal = renderSeries[0].value;
+  for (let i = 1; i < renderSeries.length; i += 1) {
+    const v = renderSeries[i].value;
+    if (v < minVal) minVal = v;
+    if (v > maxVal) maxVal = v;
+  }
+  if (minVal === maxVal) {
+    minVal -= 1;
+    maxVal += 1;
+  }
+  const range = maxVal - minVal;
+  minVal -= range * 0.08;
+  maxVal += range * 0.08;
+
+  graphCtx.strokeStyle = "rgba(255,255,255,0.08)";
+  graphCtx.lineWidth = 1;
+  graphCtx.beginPath();
+  graphCtx.moveTo(padding.left, padding.top);
+  graphCtx.lineTo(padding.left, height - padding.bottom);
+  graphCtx.lineTo(width - padding.right, height - padding.bottom);
+  graphCtx.stroke();
+
+  graphCtx.strokeStyle = "rgba(255,255,255,0.06)";
+  graphCtx.lineWidth = 1;
+  for (let i = 1; i <= 4; i += 1) {
+    const y = padding.top + (plotH * i) / 5;
+    graphCtx.beginPath();
+    graphCtx.moveTo(padding.left, y);
+    graphCtx.lineTo(width - padding.right, y);
+    graphCtx.stroke();
+  }
+
+  graphCtx.strokeStyle = "rgba(76, 201, 240, 0.25)";
+  graphCtx.lineWidth = 1;
+  graphCtx.beginPath();
+  for (let i = 0; i < renderSeries.length; i += 1) {
+    const entry = renderSeries[i];
+    const t = maxIter === minIter ? 0 : (entry.iter - minIter) / (maxIter - minIter);
+    const v = (entry.value - minVal) / (maxVal - minVal);
+    const x = padding.left + t * plotW;
+    const y = padding.top + (1 - v) * plotH;
+    if (i === 0) {
+      graphCtx.moveTo(x, y);
+    } else {
+      graphCtx.lineTo(x, y);
+    }
+  }
+  graphCtx.stroke();
+
+  graphCtx.strokeStyle = "#4cc9f0";
+  graphCtx.lineWidth = 2;
+  graphCtx.beginPath();
+  for (let i = 0; i < smoothSeriesData.length; i += 1) {
+    const entry = smoothSeriesData[i];
+    const t = maxIter === minIter ? 0 : (entry.iter - minIter) / (maxIter - minIter);
+    const v = (entry.value - minVal) / (maxVal - minVal);
+    const x = padding.left + t * plotW;
+    const y = padding.top + (1 - v) * plotH;
+    if (i === 0) {
+      graphCtx.moveTo(x, y);
+    } else {
+      graphCtx.lineTo(x, y);
+    }
+  }
+  graphCtx.stroke();
+
+  const latest = smoothSeriesData[smoothSeriesData.length - 1];
+  graphCtx.fillStyle = "#f6c177";
+  graphCtx.beginPath();
+  const latestT = maxIter === minIter ? 0 : (latest.iter - minIter) / (maxIter - minIter);
+  const latestV = (latest.value - minVal) / (maxVal - minVal);
+  graphCtx.arc(
+    padding.left + latestT * plotW,
+    padding.top + (1 - latestV) * plotH,
+    3,
+    0,
+    Math.PI * 2
+  );
+  graphCtx.fill();
+
+  graphCtx.fillStyle = "rgba(230, 238, 247, 0.7)";
+  graphCtx.font = "12px IBM Plex Sans, Segoe UI, sans-serif";
+  graphCtx.fillText(minVal.toFixed(1), 12, height - padding.bottom + 4);
+  graphCtx.fillText(maxVal.toFixed(1), 12, padding.top + 4);
+  graphCtx.fillText(`Iter ${Math.round(latest.iter)}`, width - padding.right - 70, height - 12);
+}
+
+function openGraph() {
+  graphModal.classList.remove("hidden");
+  graphModal.setAttribute("aria-hidden", "false");
+  resizeGraphCanvas();
+}
+
+function closeGraph() {
+  graphModal.classList.add("hidden");
+  graphModal.setAttribute("aria-hidden", "true");
+}
+
 function updateStats(stats) {
   if (stats.bestScore != null) {
     bestTimeEl.textContent = stats.bestScore.toFixed(2);
@@ -506,6 +742,9 @@ function startOptimization() {
   lastConfig = config;
   trips = sampleTrips(config);
   tripPaths = buildTripPaths(trips, bestNetwork, config);
+  graphSeries = [];
+  graphBuckets = new Map();
+  drawGraph();
   bestScore = Infinity;
   bestNetwork = null;
   updateStats({ bestScore: null, currentScore: null, bestLines: null, bestStations: null, iter: null });
@@ -555,6 +794,12 @@ function handleWorkerMessage(message) {
     if (lastConfig) {
       tripPaths = buildTripPaths(trips, bestNetwork, lastConfig);
     }
+    if (message.avgTripDistance != null) {
+      addGraphSample(message.iter, message.avgTripDistance);
+    } else if (message.trips) {
+      addGraphSample(message.iter, averageTripDistance(message.trips));
+    }
+    drawGraph();
     updateStats({
       bestScore,
       currentScore: message.currentScore,
@@ -588,7 +833,22 @@ resampleBtn.addEventListener("click", () => {
   draw();
 });
 
+graphBtn.addEventListener("click", () => {
+  openGraph();
+});
+
+graphCloseBtn.addEventListener("click", () => {
+  closeGraph();
+});
+
+graphModal.addEventListener("click", (event) => {
+  if (event.target === graphModal) {
+    closeGraph();
+  }
+});
+
 window.addEventListener("resize", resizeCanvas);
+window.addEventListener("resize", resizeGraphCanvas);
 
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
@@ -613,4 +873,6 @@ canvas.addEventListener("mouseleave", () => {
 
 lastConfig = readConfig();
 trips = sampleTrips(lastConfig);
+tripPaths = buildTripPaths(trips, bestNetwork, lastConfig);
 resizeCanvas();
+drawGraph();

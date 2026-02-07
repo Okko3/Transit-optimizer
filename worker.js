@@ -444,6 +444,12 @@ function optimize(config, rng) {
     if (iter % reportEvery === 0 || iter === iterations - 1) {
       const bestStationsCount = best.lines.reduce((sum, line) => sum + line.stations.length, 0);
       const previewCount = Math.min(trips.length, 60);
+      let tripDistanceSum = 0;
+      for (let i = 0; i < trips.length; i += 1) {
+        const trip = trips[i];
+        tripDistanceSum += distance(trip.ax, trip.ay, trip.bx, trip.by);
+      }
+      const avgTripDistance = trips.length ? tripDistanceSum / trips.length : 0;
       self.postMessage({
         type: "update",
         iter,
@@ -453,6 +459,7 @@ function optimize(config, rng) {
         bestStations: bestStationsCount,
         bestNetwork: best,
         trips: trips.slice(0, previewCount),
+        avgTripDistance,
       });
     }
   }

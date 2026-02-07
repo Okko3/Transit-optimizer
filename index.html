@@ -104,6 +104,7 @@
             <button type="button" id="startBtn">Start optimization</button>
             <button type="button" id="stopBtn" disabled>Stop</button>
             <button type="button" id="resampleBtn">Resample trips</button>
+            <button type="button" id="graphBtn">Show graph</button>
           </div>
         </form>
 
@@ -148,6 +149,21 @@
           Train segments use acceleration and stop speed. Transfers only at shared stations.
         </div>
       </section>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="graphModal" aria-hidden="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title">Trip length over time</div>
+          <div class="modal-subtitle">Average trip length per iteration sample</div>
+        </div>
+        <button type="button" id="graphCloseBtn">Close</button>
+      </div>
+      <div class="modal-body">
+        <canvas id="graphCanvas"></canvas>
+      </div>
     </div>
   </div>
 
