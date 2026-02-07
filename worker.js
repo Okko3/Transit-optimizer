@@ -5,9 +5,8 @@ self.onmessage = (event) => {
   if (message.type === "start") {
     running = true;
     const config = message.config;
-    const trips = message.trips;
     const rng = createRng(message.seed || 1);
-    optimize(config, trips, rng);
+    optimize(config, rng);
   }
   if (message.type === "stop") {
     running = false;
@@ -20,6 +19,18 @@ function createRng(seed) {
     state = (1664525 * state + 1013904223) >>> 0;
     return state / 4294967296;
   };
+}
+
+function sampleTrips(config, rng) {
+  const list = [];
+  for (let i = 0; i < config.tripCount; i += 1) {
+    const ax = rng() * config.worldWidth;
+    const ay = rng() * config.worldHeight;
+    const bx = rng() * config.worldWidth;
+    const by = rng() * config.worldHeight;
+    list.push({ ax, ay, bx, by });
+  }
+  return list;
 }
 
 function randRange(rng, min, max) {
@@ -401,11 +412,11 @@ function evaluate(network, config, trips) {
   return total / trips.length;
 }
 
-function optimize(config, trips, rng) {
+function optimize(config, rng) {
   let current = initNetwork(config, rng);
-  let currentScore = evaluate(current, config, trips);
+  let currentScore = Infinity;
   let best = current;
-  let bestScore = currentScore;
+  let bestScore = Infinity;
 
   const startTemp = 2.0;
   const endTemp = 0.15;
@@ -413,10 +424,12 @@ function optimize(config, trips, rng) {
   const reportEvery = Math.max(20, Math.floor(iterations / 150));
 
   for (let iter = 0; iter < iterations && running; iter += 1) {
+    const trips = sampleTrips(config, rng);
+    const baseScore = evaluate(current, config, trips);
     const temp = startTemp * Math.pow(endTemp / startTemp, iter / iterations);
     const candidate = mutateNetwork(current, config, rng);
     const score = evaluate(candidate, config, trips);
-    const delta = score - currentScore;
+    const delta = score - baseScore;
     if (delta < 0 || Math.exp(-delta / temp) > rng()) {
       current = candidate;
       currentScore = score;
@@ -424,10 +437,13 @@ function optimize(config, trips, rng) {
         best = candidate;
         bestScore = score;
       }
+    } else {
+      currentScore = baseScore;
     }
 
     if (iter % reportEvery === 0 || iter === iterations - 1) {
       const bestStationsCount = best.lines.reduce((sum, line) => sum + line.stations.length, 0);
+      const previewCount = Math.min(trips.length, 60);
       self.postMessage({
         type: "update",
         iter,
@@ -436,6 +452,7 @@ function optimize(config, trips, rng) {
         bestLines: best.lines.length,
         bestStations: bestStationsCount,
         bestNetwork: best,
+        trips: trips.slice(0, previewCount),
       });
     }
   }

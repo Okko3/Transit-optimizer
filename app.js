@@ -16,6 +16,7 @@ let bestNetwork = null;
 let bestScore = Infinity;
 let lastConfig = null;
 let trips = [];
+let tripPaths = [];
 let runState = "Idle";
 let activeWorkers = 0;
 let view = {
@@ -37,6 +38,7 @@ const palette = [
   "#70d6ff",
   "#cdb4db",
 ];
+const TRIP_DRAW_LIMIT = 60;
 
 function readNumber(id, fallback) {
   const el = document.getElementById(id);
@@ -64,6 +66,257 @@ function sampleTrips(config) {
     list.push({ ax, ay, bx, by });
   }
   return list;
+}
+
+function distance(ax, ay, bx, by) {
+  const dx = ax - bx;
+  const dy = ay - by;
+  return Math.hypot(dx, dy);
+}
+
+function segmentTime(length, vMax, accel, vStop) {
+  const vmax = Math.max(vMax, vStop + 1e-6);
+  const a = Math.max(accel, 1e-6);
+  const vs = Math.min(vStop, vmax);
+  const dAccel = (vmax * vmax - vs * vs) / (2 * a);
+  if (2 * dAccel < length) {
+    const tAccel = (vmax - vs) / a;
+    const cruise = (length - 2 * dAccel) / vmax;
+    return 2 * tAccel + cruise;
+  }
+  const vPeak = Math.sqrt(vs * vs + a * length);
+  return 2 * (vPeak - vs) / a;
+}
+
+function buildStations(network, config) {
+  const stations = [];
+  const stationLines = [];
+  const lineStations = [];
+
+  for (let lineIndex = 0; lineIndex < network.lines.length; lineIndex += 1) {
+    const line = network.lines[lineIndex];
+    const half = line.length * 0.5;
+    const dx = Math.cos(line.angle) * half;
+    const dy = Math.sin(line.angle) * half;
+    const x1 = line.center.x - dx;
+    const y1 = line.center.y - dy;
+    const x2 = line.center.x + dx;
+    const y2 = line.center.y + dy;
+
+    const stationsOnLine = [];
+    for (let s = 0; s < line.stations.length; s += 1) {
+      const t = line.stations[s];
+      const sx = x1 + (x2 - x1) * t;
+      const sy = y1 + (y2 - y1) * t;
+
+      let stationIndex = -1;
+      for (let k = 0; k < stations.length; k += 1) {
+        if (distance(sx, sy, stations[k].x, stations[k].y) <= config.mergeDistance) {
+          stationIndex = k;
+          break;
+        }
+      }
+      if (stationIndex === -1) {
+        stationIndex = stations.length;
+        stations.push({ x: sx, y: sy });
+        stationLines.push([]);
+      }
+
+      stationLines[stationIndex].push(lineIndex);
+      stationsOnLine.push({ stationIndex, t, x: sx, y: sy });
+    }
+
+    stationsOnLine.sort((a, b) => a.t - b.t);
+    lineStations.push(stationsOnLine);
+  }
+
+  return { stations, stationLines, lineStations };
+}
+
+function buildGraph(network, config) {
+  const { stations, stationLines, lineStations } = buildStations(network, config);
+
+  const nodes = [];
+  const stationNodes = stations.map(() => []);
+
+  for (let lineIndex = 0; lineIndex < lineStations.length; lineIndex += 1) {
+    const entries = lineStations[lineIndex];
+    for (let i = 0; i < entries.length; i += 1) {
+      const entry = entries[i];
+      const nodeId = nodes.length;
+      nodes.push({ lineIndex, stationIndex: entry.stationIndex, x: entry.x, y: entry.y });
+      stationNodes[entry.stationIndex].push(nodeId);
+      entry.nodeId = nodeId;
+    }
+  }
+
+  const adjacency = nodes.map(() => []);
+  for (let lineIndex = 0; lineIndex < lineStations.length; lineIndex += 1) {
+    const entries = lineStations[lineIndex];
+    for (let i = 0; i < entries.length - 1; i += 1) {
+      const a = entries[i];
+      const b = entries[i + 1];
+      const length = distance(a.x, a.y, b.x, b.y);
+      const time = segmentTime(length, config.trainSpeed, config.accel, config.stopSpeed);
+      adjacency[a.nodeId].push({ to: b.nodeId, weight: time });
+      adjacency[b.nodeId].push({ to: a.nodeId, weight: time });
+    }
+  }
+
+  for (let s = 0; s < stationNodes.length; s += 1) {
+    const nodesAtStation = stationNodes[s];
+    if (nodesAtStation.length > 1) {
+      for (let i = 0; i < nodesAtStation.length; i += 1) {
+        for (let j = i + 1; j < nodesAtStation.length; j += 1) {
+          const a = nodesAtStation[i];
+          const b = nodesAtStation[j];
+          adjacency[a].push({ to: b, weight: config.transferPenalty });
+          adjacency[b].push({ to: a, weight: config.transferPenalty });
+        }
+      }
+    }
+  }
+
+  return { stations, stationNodes, nodes, adjacency };
+}
+
+function dijkstraWithPrev(start, adjacency) {
+  const n = adjacency.length;
+  const dist = new Array(n).fill(Infinity);
+  const visited = new Array(n).fill(false);
+  const prev = new Array(n).fill(-1);
+  dist[start] = 0;
+
+  for (let i = 0; i < n; i += 1) {
+    let best = Infinity;
+    let node = -1;
+    for (let j = 0; j < n; j += 1) {
+      if (!visited[j] && dist[j] < best) {
+        best = dist[j];
+        node = j;
+      }
+    }
+    if (node === -1) {
+      break;
+    }
+    visited[node] = true;
+    const edges = adjacency[node];
+    for (let e = 0; e < edges.length; e += 1) {
+      const edge = edges[e];
+      const nextDist = dist[node] + edge.weight;
+      if (nextDist < dist[edge.to]) {
+        dist[edge.to] = nextDist;
+        prev[edge.to] = node;
+      }
+    }
+  }
+
+  return { dist, prev };
+}
+
+function reconstructPath(prev, start, target) {
+  const path = [];
+  let cur = target;
+  while (cur !== -1) {
+    path.push(cur);
+    if (cur === start) {
+      break;
+    }
+    cur = prev[cur];
+  }
+  if (path[path.length - 1] !== start) {
+    return null;
+  }
+  path.reverse();
+  return path;
+}
+
+function buildTripPaths(tripList, network, config) {
+  const count = Math.min(tripList.length, TRIP_DRAW_LIMIT);
+  if (!network || !network.lines || !network.lines.length) {
+    return tripList.slice(0, count).map((trip) => ({
+      usesTrain: false,
+      path: [
+        { x: trip.ax, y: trip.ay },
+        { x: trip.bx, y: trip.by },
+      ],
+    }));
+  }
+
+  const graph = buildGraph(network, config);
+  const { stations, stationNodes, nodes, adjacency } = graph;
+  if (!stations.length || !nodes.length) {
+    return tripList.slice(0, count).map((trip) => ({
+      usesTrain: false,
+      path: [
+        { x: trip.ax, y: trip.ay },
+        { x: trip.bx, y: trip.by },
+      ],
+    }));
+  }
+
+  const allDijkstra = nodes.map((_, idx) => dijkstraWithPrev(idx, adjacency));
+  const results = [];
+
+  for (let i = 0; i < count; i += 1) {
+    const trip = tripList[i];
+    const directTime = distance(trip.ax, trip.ay, trip.bx, trip.by) / config.walkSpeed;
+    let bestTime = directTime;
+    let bestEntry = -1;
+    let bestExit = -1;
+    let bestPrev = null;
+
+    const walkEnd = stations.map((s) => distance(trip.bx, trip.by, s.x, s.y) / config.walkSpeed);
+
+    for (let s = 0; s < stations.length; s += 1) {
+      const walkStart = distance(trip.ax, trip.ay, stations[s].x, stations[s].y) / config.walkSpeed;
+      const walkStartTotal = walkStart + config.boardPenalty;
+      if (walkStartTotal >= bestTime) {
+        continue;
+      }
+      const entryNodes = stationNodes[s];
+      for (let e = 0; e < entryNodes.length; e += 1) {
+        const entryNode = entryNodes[e];
+        const { dist, prev } = allDijkstra[entryNode];
+        for (let exitNode = 0; exitNode < nodes.length; exitNode += 1) {
+          const trainDist = dist[exitNode];
+          if (!Number.isFinite(trainDist)) {
+            continue;
+          }
+          const exitStation = nodes[exitNode].stationIndex;
+          const total = walkStartTotal + trainDist + walkEnd[exitStation];
+          if (total < bestTime) {
+            bestTime = total;
+            bestEntry = entryNode;
+            bestExit = exitNode;
+            bestPrev = prev;
+          }
+        }
+      }
+    }
+
+    if (bestEntry >= 0 && bestExit >= 0 && bestPrev) {
+      const trainPath = reconstructPath(bestPrev, bestEntry, bestExit);
+      if (trainPath && trainPath.length) {
+        const trainPoints = trainPath.map((idx) => ({ x: nodes[idx].x, y: nodes[idx].y }));
+        results.push({
+          usesTrain: true,
+          path: [{ x: trip.ax, y: trip.ay }, ...trainPoints, { x: trip.bx, y: trip.by }],
+        });
+        continue;
+      }
+    }
+
+    results.push({
+      usesTrain: false,
+      path: [
+        { x: trip.ax, y: trip.ay },
+        { x: trip.bx, y: trip.by },
+      ],
+    });
+  }
+
+  return results;
 }
 
 function readConfig() {
@@ -158,7 +411,7 @@ function drawGrid() {
 }
 
 function drawTrips() {
-  if (!trips.length || !lastConfig) {
+  if (!tripPaths.length || !lastConfig) {
     return;
   }
   ctx.save();
@@ -166,12 +419,17 @@ function drawTrips() {
   ctx.scale(view.scale, view.scale);
   ctx.strokeStyle = "rgba(143,179,255,0.22)";
   ctx.lineWidth = 1 / view.scale;
-  const sample = Math.min(trips.length, 60);
-  for (let i = 0; i < sample; i += 1) {
-    const t = trips[i];
+  for (let i = 0; i < tripPaths.length; i += 1) {
+    const t = tripPaths[i];
+    const path = t.path;
+    if (!path || path.length < 2) {
+      continue;
+    }
     ctx.beginPath();
-    ctx.moveTo(t.ax, t.ay);
-    ctx.lineTo(t.bx, t.by);
+    ctx.moveTo(path[0].x, path[0].y);
+    for (let p = 1; p < path.length; p += 1) {
+      ctx.lineTo(path[p].x, path[p].y);
+    }
     ctx.stroke();
   }
   ctx.restore();
@@ -247,6 +505,7 @@ function startOptimization() {
   const config = readConfig();
   lastConfig = config;
   trips = sampleTrips(config);
+  tripPaths = buildTripPaths(trips, bestNetwork, config);
   bestScore = Infinity;
   bestNetwork = null;
   updateStats({ bestScore: null, currentScore: null, bestLines: null, bestStations: null, iter: null });
@@ -290,6 +549,12 @@ function handleWorkerMessage(message) {
       bestScore = message.bestScore;
       bestNetwork = message.bestNetwork;
     }
+    if (message.trips) {
+      trips = message.trips;
+    }
+    if (lastConfig) {
+      tripPaths = buildTripPaths(trips, bestNetwork, lastConfig);
+    }
     updateStats({
       bestScore,
       currentScore: message.currentScore,
@@ -319,6 +584,7 @@ stopBtn.addEventListener("click", () => {
 resampleBtn.addEventListener("click", () => {
   lastConfig = readConfig();
   trips = sampleTrips(lastConfig);
+  tripPaths = buildTripPaths(trips, bestNetwork, lastConfig);
   draw();
 });
 
