@@ -9,3 +9,5 @@ Open `index.html` in a local browser to run the simulation.
 - Adds boarding and transfer penalties.
 - Optimizes line geometry, station placement, and line count within bounds.
 - Runs multiple worker threads for faster search.
+
+<img width="2287" height="1358" alt="image" src="https://github.com/user-attachments/assets/4a8a2f1d-beed-4b8e-b52f-c416384ba2b6" />
