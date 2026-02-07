@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transit Toy Optimizer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">TS4</div>
+        <div>
+          <div class="title">Transit Toy Optimizer</div>
+          <div class="subtitle">Line layout and station optimization with fast routing</div>
+        </div>
+      </div>
+      <div class="status" id="statusText">Idle</div>
+    </header>
+
+    <div class="content">
+      <section class="panel">
+        <h2>Simulation</h2>
+        <form id="configForm">
+          <div class="grid2">
+            <label>
+              World width
+              <input type="number" id="worldWidth" value="5000" min="200" step="10" />
+            </label>
+            <label>
+              World height
+              <input type="number" id="worldHeight" value="5000" min="200" step="10" />
+            </label>
+            <label>
+              Total track length
+              <input type="number" id="totalTrack" value="10000" min="100" step="10" />
+            </label>
+            <label>
+              Journeys (sample)
+              <input type="number" id="tripCount" value="1000" min="20" step="10" />
+            </label>
+            <label>
+              Min lines
+              <input type="number" id="minLines" value="1" min="1" step="1" />
+            </label>
+            <label>
+              Max lines
+              <input type="number" id="maxLines" value="10" min="1" step="1" />
+            </label>
+            <label>
+              Train speed
+              <input type="number" id="trainSpeed" value="70" min="1" step="1" />
+            </label>
+            <label>
+              Walk speed
+              <input type="number" id="walkSpeed" value="5" min="0.5" step="0.5" />
+            </label>
+          </div>
+
+          <details>
+            <summary>Advanced</summary>
+            <div class="grid2">
+              <label>
+                Acceleration
+                <input type="number" id="accel" value="1" min="0.1" step="0.1" />
+              </label>
+              <label>
+                Stop speed
+                <input type="number" id="stopSpeed" value="0" min="0" step="0.5" />
+              </label>
+              <label>
+                Board penalty
+                <input type="number" id="boardPenalty" value="2" min="0" step="0.5" />
+              </label>
+              <label>
+                Transfer penalty
+                <input type="number" id="transferPenalty" value="2" min="0" step="0.5" />
+              </label>
+              <label>
+                Iterations
+                <input type="number" id="iterations" value="30000" min="200" step="100" />
+              </label>
+              <label>
+                Workers
+                <input type="number" id="workers" value="12" min="0" step="1" />
+              </label>
+              <label>
+                Max stations/line
+                <input type="number" id="maxStations" value="8" min="2" step="1" />
+              </label>
+              <label>
+                Merge distance
+                <input type="number" id="mergeDistance" value="8" min="0" step="1" />
+              </label>
+              <label>
+                Random seed
+                <input type="number" id="seed" value="1234" step="1" />
+              </label>
+            </div>
+          </details>
+
+          <div class="buttons">
+            <button type="button" id="startBtn">Start optimization</button>
+            <button type="button" id="stopBtn" disabled>Stop</button>
+            <button type="button" id="resampleBtn">Resample trips</button>
+          </div>
+        </form>
+
+        <div class="stats">
+          <div class="stat">
+            <span>Best avg time</span>
+            <strong id="bestTime">-</strong>
+          </div>
+          <div class="stat">
+            <span>Current avg time</span>
+            <strong id="currentTime">-</strong>
+          </div>
+          <div class="stat">
+            <span>Lines (best)</span>
+            <strong id="bestLines">-</strong>
+          </div>
+          <div class="stat">
+            <span>Stations (best)</span>
+            <strong id="bestStations">-</strong>
+          </div>
+          <div class="stat">
+            <span>Iteration</span>
+            <strong id="iterText">-</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="visual">
+        <div class="canvas-wrap">
+          <canvas id="map"></canvas>
+          <div class="overlay">
+            <div class="legend">
+              <div class="dot walk"></div>
+              <span>Trips</span>
+              <div class="dot station"></div>
+              <span>Stations</span>
+            </div>
+            <div class="note">Hover to inspect. Zoom: scroll.</div>
+          </div>
+        </div>
+        <div class="foot">
+          Train segments use acceleration and stop speed. Transfers only at shared stations.
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
