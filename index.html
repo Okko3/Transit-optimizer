@@ -97,6 +97,17 @@
                 Random seed
                 <input type="number" id="seed" value="1234" step="1" />
               </label>
+              <label class="checkbox span2">
+                <span>Center bias (downtown)</span>
+                <input type="checkbox" id="centerBiasEnabled" />
+              </label>
+              <label class="range span2">
+                Center bias strength
+                <div class="range-row">
+                  <input type="range" id="centerBiasStrength" min="0" max="1" step="0.05" value="0.6" />
+                  <span class="range-value" id="centerBiasValue">0.60</span>
+                </div>
+              </label>
             </div>
           </details>
 

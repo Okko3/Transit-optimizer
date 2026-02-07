@@ -21,14 +21,33 @@ function createRng(seed) {
   };
 }
 
+function biasUnit(u, strength) {
+  const clamped = Math.min(1, Math.max(0, strength));
+  if (clamped <= 0) {
+    return u;
+  }
+  const sign = u < 0.5 ? -1 : 1;
+  const dist = Math.abs(u - 0.5) * 2;
+  const power = 1 + clamped * 4;
+  const biasedDist = Math.pow(dist, power);
+  return 0.5 + sign * 0.5 * biasedDist;
+}
+
+function samplePoint(config, rng) {
+  if (config.centerBiasEnabled && config.centerBiasStrength > 0) {
+    const u = biasUnit(rng(), config.centerBiasStrength);
+    const v = biasUnit(rng(), config.centerBiasStrength);
+    return { x: u * config.worldWidth, y: v * config.worldHeight };
+  }
+  return { x: rng() * config.worldWidth, y: rng() * config.worldHeight };
+}
+
 function sampleTrips(config, rng) {
   const list = [];
   for (let i = 0; i < config.tripCount; i += 1) {
-    const ax = rng() * config.worldWidth;
-    const ay = rng() * config.worldHeight;
-    const bx = rng() * config.worldWidth;
-    const by = rng() * config.worldHeight;
-    list.push({ ax, ay, bx, by });
+    const a = samplePoint(config, rng);
+    const b = samplePoint(config, rng);
+    list.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y });
   }
   return list;
 }
@@ -65,6 +84,104 @@ function segmentTime(length, vMax, accel, vStop) {
   }
   const vPeak = Math.sqrt(vs * vs + a * length);
   return 2 * (vPeak - vs) / a;
+}
+
+class MinHeap {
+  constructor() {
+    this.data = [];
+  }
+
+  get size() {
+    return this.data.length;
+  }
+
+  push(node, priority) {
+    const item = { node, priority };
+    this.data.push(item);
+    this.bubbleUp(this.data.length - 1);
+  }
+
+  pop() {
+    if (this.data.length === 0) {
+      return null;
+    }
+    const root = this.data[0];
+    const last = this.data.pop();
+    if (this.data.length > 0 && last) {
+      this.data[0] = last;
+      this.bubbleDown(0);
+    }
+    return root;
+  }
+
+  bubbleUp(index) {
+    let i = index;
+    while (i > 0) {
+      const parent = Math.floor((i - 1) / 2);
+      if (this.data[parent].priority <= this.data[i].priority) {
+        break;
+      }
+      [this.data[parent], this.data[i]] = [this.data[i], this.data[parent]];
+      i = parent;
+    }
+  }
+
+  bubbleDown(index) {
+    let i = index;
+    const length = this.data.length;
+    while (true) {
+      const left = i * 2 + 1;
+      const right = i * 2 + 2;
+      let smallest = i;
+      if (left < length && this.data[left].priority < this.data[smallest].priority) {
+        smallest = left;
+      }
+      if (right < length && this.data[right].priority < this.data[smallest].priority) {
+        smallest = right;
+      }
+      if (smallest === i) {
+        break;
+      }
+      [this.data[i], this.data[smallest]] = [this.data[smallest], this.data[i]];
+      i = smallest;
+    }
+  }
+}
+
+function dijkstraMultiSource(adjacency, sources) {
+  const n = adjacency.length;
+  const dist = new Array(n).fill(Infinity);
+  const heap = new MinHeap();
+  for (let i = 0; i < sources.length; i += 1) {
+    const src = sources[i];
+    if (src == null) {
+      continue;
+    }
+    dist[src] = 0;
+    heap.push(src, 0);
+  }
+
+  while (heap.size > 0) {
+    const entry = heap.pop();
+    if (!entry) {
+      break;
+    }
+    const { node, priority } = entry;
+    if (priority !== dist[node]) {
+      continue;
+    }
+    const edges = adjacency[node];
+    for (let e = 0; e < edges.length; e += 1) {
+      const edge = edges[e];
+      const nextDist = priority + edge.weight;
+      if (nextDist < dist[edge.to]) {
+        dist[edge.to] = nextDist;
+        heap.push(edge.to, nextDist);
+      }
+    }
+  }
+
+  return dist;
 }
 
 function initNetwork(config, rng) {
@@ -119,7 +236,7 @@ function clampLine(line, config) {
   line.center.y = clamp(line.center.y, dy, config.worldHeight - dy);
 }
 
-function mutateNetwork(network, config, rng) {
+function mutateNetwork(network, config, rng, scale) {
   const next = {
     lines: network.lines.map((line) => ({
       length: line.length,
@@ -129,17 +246,18 @@ function mutateNetwork(network, config, rng) {
     })),
   };
 
+  const tweak = Math.max(0.4, Math.min(2.2, scale || 1));
   const minLineLength = Math.max(40, config.totalTrack * 0.04);
 
   const roll = rng();
   if (roll < 0.2) {
     const line = next.lines[Math.floor(randRange(rng, 0, next.lines.length))];
-    line.center.x += randNormal(rng) * (config.worldWidth * 0.03);
-    line.center.y += randNormal(rng) * (config.worldHeight * 0.03);
+    line.center.x += randNormal(rng) * (config.worldWidth * 0.03 * tweak);
+    line.center.y += randNormal(rng) * (config.worldHeight * 0.03 * tweak);
     clampLine(line, config);
   } else if (roll < 0.35) {
     const line = next.lines[Math.floor(randRange(rng, 0, next.lines.length))];
-    line.angle += randNormal(rng) * 0.2;
+    line.angle += randNormal(rng) * 0.2 * tweak;
     clampLine(line, config);
   } else if (roll < 0.5 && next.lines.length > 1) {
     const i = Math.floor(randRange(rng, 0, next.lines.length));
@@ -149,7 +267,7 @@ function mutateNetwork(network, config, rng) {
     }
     const lineA = next.lines[i];
     const lineB = next.lines[j];
-    const delta = randRange(rng, -1, 1) * config.totalTrack * 0.05;
+    const delta = randRange(rng, -1, 1) * config.totalTrack * 0.05 * tweak;
     if (lineA.length + delta > minLineLength && lineB.length - delta > minLineLength) {
       lineA.length += delta;
       lineB.length -= delta;
@@ -157,7 +275,7 @@ function mutateNetwork(network, config, rng) {
       clampLine(lineB, config);
     }
   } else if (roll < 0.62) {
-    mutateStations(next, config, rng);
+    mutateStations(next, config, rng, tweak);
   } else if (roll < 0.74) {
     if (next.lines.length < config.maxLines) {
       addLine(next, config, rng, minLineLength);
@@ -168,9 +286,9 @@ function mutateNetwork(network, config, rng) {
     }
   } else {
     const line = next.lines[Math.floor(randRange(rng, 0, next.lines.length))];
-    line.center.x += randNormal(rng) * (config.worldWidth * 0.02);
-    line.center.y += randNormal(rng) * (config.worldHeight * 0.02);
-    line.angle += randNormal(rng) * 0.1;
+    line.center.x += randNormal(rng) * (config.worldWidth * 0.02 * tweak);
+    line.center.y += randNormal(rng) * (config.worldHeight * 0.02 * tweak);
+    line.angle += randNormal(rng) * 0.1 * tweak;
     clampLine(line, config);
   }
 
@@ -213,10 +331,11 @@ function removeLine(network, config, rng) {
   clampLine(receiver, config);
 }
 
-function mutateStations(network, config, rng) {
+function mutateStations(network, config, rng, scale) {
   const line = network.lines[Math.floor(randRange(rng, 0, network.lines.length))];
   const interior = line.stations.slice(1, -1);
   const interiorCount = interior.length;
+  const tweak = Math.max(0.4, Math.min(2.2, scale || 1));
 
   const roll = rng();
   if (roll < 0.33 && line.stations.length < config.maxStations) {
@@ -227,7 +346,7 @@ function mutateStations(network, config, rng) {
   } else if (interiorCount > 0) {
     const moveIndex = Math.floor(randRange(rng, 0, interiorCount));
     const idx = moveIndex + 1;
-    line.stations[idx] = clamp(line.stations[idx] + randNormal(rng) * 0.08, 0.05, 0.95);
+    line.stations[idx] = clamp(line.stations[idx] + randNormal(rng) * 0.08 * tweak, 0.05, 0.95);
   }
 
   line.stations = normalizeStations(line.stations);
@@ -322,60 +441,40 @@ function buildGraph(network, config) {
     }
   }
 
-  const distToStation = nodes.map(() => new Array(stations.length).fill(Infinity));
-  for (let i = 0; i < nodes.length; i += 1) {
-    const dist = dijkstra(i, adjacency);
-    for (let s = 0; s < stations.length; s += 1) {
+  return { stations, stationNodes, adjacency };
+}
+
+function buildStationTravel(graph) {
+  const { stations, stationNodes, adjacency } = graph;
+  const stationCount = stations.length;
+  const travel = Array.from({ length: stationCount }, () => new Array(stationCount).fill(Infinity));
+
+  for (let s = 0; s < stationCount; s += 1) {
+    const sources = stationNodes[s];
+    if (!sources || sources.length === 0) {
+      continue;
+    }
+    const dist = dijkstraMultiSource(adjacency, sources);
+    for (let t = 0; t < stationCount; t += 1) {
       let best = Infinity;
-      const nodesAt = stationNodes[s];
+      const nodesAt = stationNodes[t];
       for (let k = 0; k < nodesAt.length; k += 1) {
         const d = dist[nodesAt[k]];
         if (d < best) {
           best = d;
         }
       }
-      distToStation[i][s] = best;
+      travel[s][t] = best;
     }
   }
 
-  return { stations, stationNodes, distToStation };
-}
-
-function dijkstra(start, adjacency) {
-  const n = adjacency.length;
-  const dist = new Array(n).fill(Infinity);
-  const visited = new Array(n).fill(false);
-  dist[start] = 0;
-
-  for (let i = 0; i < n; i += 1) {
-    let best = Infinity;
-    let node = -1;
-    for (let j = 0; j < n; j += 1) {
-      if (!visited[j] && dist[j] < best) {
-        best = dist[j];
-        node = j;
-      }
-    }
-    if (node === -1) {
-      break;
-    }
-    visited[node] = true;
-    const edges = adjacency[node];
-    for (let e = 0; e < edges.length; e += 1) {
-      const edge = edges[e];
-      const nextDist = dist[node] + edge.weight;
-      if (nextDist < dist[edge.to]) {
-        dist[edge.to] = nextDist;
-      }
-    }
-  }
-
-  return dist;
+  return travel;
 }
 
 function evaluate(network, config, trips) {
   const graph = buildGraph(network, config);
-  const { stations, stationNodes, distToStation } = graph;
+  const { stations } = graph;
+  const stationTravel = buildStationTravel(graph);
   let total = 0;
 
   for (let i = 0; i < trips.length; i += 1) {
@@ -383,18 +482,16 @@ function evaluate(network, config, trips) {
     const direct = distance(trip.ax, trip.ay, trip.bx, trip.by) / config.walkSpeed;
     let best = direct;
 
-    const walkToDest = stations.map((s) => distance(trip.bx, trip.by, s.x, s.y) / config.walkSpeed);
-
-    for (let s = 0; s < stations.length; s += 1) {
-      const walkStart = distance(trip.ax, trip.ay, stations[s].x, stations[s].y) / config.walkSpeed;
-      if (walkStart + config.boardPenalty >= best) {
-        continue;
-      }
-      const nodesAt = stationNodes[s];
-      for (let n = 0; n < nodesAt.length; n += 1) {
-        const nodeId = nodesAt[n];
+    if (stations.length > 0) {
+      const walkToDest = stations.map((s) => distance(trip.bx, trip.by, s.x, s.y) / config.walkSpeed);
+      for (let s = 0; s < stations.length; s += 1) {
+        const walkStart = distance(trip.ax, trip.ay, stations[s].x, stations[s].y) / config.walkSpeed;
+        if (walkStart + config.boardPenalty >= best) {
+          continue;
+        }
+        const row = stationTravel[s];
         for (let t = 0; t < stations.length; t += 1) {
-          const route = distToStation[nodeId][t];
+          const route = row[t];
           if (!Number.isFinite(route)) {
             continue;
           }
@@ -417,6 +514,9 @@ function optimize(config, rng) {
   let currentScore = Infinity;
   let best = current;
   let bestScore = Infinity;
+  let mutationScale = 1;
+  let acceptCount = 0;
+  const adaptWindow = Math.max(80, Math.floor(config.iterations / 80));
 
   const startTemp = 2.0;
   const endTemp = 0.15;
@@ -427,18 +527,31 @@ function optimize(config, rng) {
     const trips = sampleTrips(config, rng);
     const baseScore = evaluate(current, config, trips);
     const temp = startTemp * Math.pow(endTemp / startTemp, iter / iterations);
-    const candidate = mutateNetwork(current, config, rng);
+    const candidate = mutateNetwork(current, config, rng, mutationScale);
     const score = evaluate(candidate, config, trips);
     const delta = score - baseScore;
-    if (delta < 0 || Math.exp(-delta / temp) > rng()) {
+    const accept = delta < 0 || Math.exp(-delta / temp) > rng();
+    if (accept) {
       current = candidate;
       currentScore = score;
+      acceptCount += 1;
       if (score < bestScore) {
         best = candidate;
         bestScore = score;
       }
     } else {
       currentScore = baseScore;
+    }
+
+    if (iter > 0 && iter % adaptWindow === 0) {
+      const rate = acceptCount / adaptWindow;
+      if (rate < 0.2) {
+        mutationScale *= 0.85;
+      } else if (rate > 0.55) {
+        mutationScale *= 1.15;
+      }
+      mutationScale = Math.max(0.5, Math.min(2.0, mutationScale));
+      acceptCount = 0;
     }
 
     if (iter % reportEvery === 0 || iter === iterations - 1) {

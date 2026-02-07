@@ -13,6 +13,9 @@ const graphModal = document.getElementById("graphModal");
 const graphCloseBtn = document.getElementById("graphCloseBtn");
 const graphCanvas = document.getElementById("graphCanvas");
 const graphCtx = graphCanvas.getContext("2d");
+const centerBiasEnabledEl = document.getElementById("centerBiasEnabled");
+const centerBiasStrengthEl = document.getElementById("centerBiasStrength");
+const centerBiasValueEl = document.getElementById("centerBiasValue");
 const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
 
@@ -63,16 +66,35 @@ function createRng(seed) {
   };
 }
 
+function biasUnit(u, strength) {
+  const clamped = Math.min(1, Math.max(0, strength));
+  if (clamped <= 0) {
+    return u;
+  }
+  const sign = u < 0.5 ? -1 : 1;
+  const dist = Math.abs(u - 0.5) * 2;
+  const power = 1 + clamped * 4;
+  const biasedDist = Math.pow(dist, power);
+  return 0.5 + sign * 0.5 * biasedDist;
+}
+
+function samplePoint(config, rng) {
+  if (config.centerBiasEnabled && config.centerBiasStrength > 0) {
+    const u = biasUnit(rng(), config.centerBiasStrength);
+    const v = biasUnit(rng(), config.centerBiasStrength);
+    return { x: u * config.worldWidth, y: v * config.worldHeight };
+  }
+  return { x: rng() * config.worldWidth, y: rng() * config.worldHeight };
+}
+
 function sampleTrips(config) {
   const seed = Math.floor(config.seed || 1);
   const rng = createRng(seed);
   const list = [];
   for (let i = 0; i < config.tripCount; i += 1) {
-    const ax = rng() * config.worldWidth;
-    const ay = rng() * config.worldHeight;
-    const bx = rng() * config.worldWidth;
-    const by = rng() * config.worldHeight;
-    list.push({ ax, ay, bx, by });
+    const a = samplePoint(config, rng);
+    const b = samplePoint(config, rng);
+    list.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y });
   }
   return list;
 }
@@ -346,6 +368,11 @@ function readConfig() {
   const minLines = Math.max(1, Math.floor(readNumber("minLines", 1)));
   const maxLines = Math.max(minLines, Math.floor(readNumber("maxLines", 10)));
   const totalTrack = Math.max(50, readNumber("totalTrack", 10000));
+  const centerBiasEnabled = Boolean(centerBiasEnabledEl?.checked);
+  const centerBiasStrengthRaw = readNumber("centerBiasStrength", 0.6);
+  const centerBiasStrength = centerBiasEnabled
+    ? Math.min(1, Math.max(0, centerBiasStrengthRaw))
+    : 0;
 
   return {
     worldWidth,
@@ -365,6 +392,8 @@ function readConfig() {
     mergeDistance: Math.max(0, readNumber("mergeDistance", 8)),
     workers: Math.max(0, Math.floor(readNumber("workers", 12))),
     seed: Math.floor(readNumber("seed", 1234)),
+    centerBiasEnabled,
+    centerBiasStrength,
   };
 }
 
@@ -713,6 +742,15 @@ function closeGraph() {
   graphModal.setAttribute("aria-hidden", "true");
 }
 
+function updateCenterBiasUI() {
+  if (!centerBiasStrengthEl || !centerBiasValueEl || !centerBiasEnabledEl) {
+    return;
+  }
+  const enabled = centerBiasEnabledEl.checked;
+  centerBiasStrengthEl.disabled = !enabled;
+  centerBiasValueEl.textContent = parseFloat(centerBiasStrengthEl.value || "0").toFixed(2);
+}
+
 function updateStats(stats) {
   if (stats.bestScore != null) {
     bestTimeEl.textContent = stats.bestScore.toFixed(2);
@@ -847,6 +885,9 @@ graphModal.addEventListener("click", (event) => {
   }
 });
 
+centerBiasEnabledEl.addEventListener("change", updateCenterBiasUI);
+centerBiasStrengthEl.addEventListener("input", updateCenterBiasUI);
+
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("resize", resizeGraphCanvas);
 
@@ -876,3 +917,4 @@ trips = sampleTrips(lastConfig);
 tripPaths = buildTripPaths(trips, bestNetwork, lastConfig);
 resizeCanvas();
 drawGraph();
+updateCenterBiasUI();
